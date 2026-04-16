@@ -55,3 +55,7 @@ Prompt.docx
 # Credentials
 creds.md
 *.credentials
+
+# Session files with sensitive data
+SESSION.md
+SESSION_CJA.md
