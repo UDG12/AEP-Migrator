@@ -1,0 +1,65 @@
+version: '3.8'
+
+# Development Docker Compose - runs only dependencies
+# Use this with `npm run dev` for local development
+
+services:
+  # ==========================================================================
+  # MongoDB Database
+  # ==========================================================================
+  mongo:
+    image: mongo:7.0
+    container_name: aep-migrator-mongo-dev
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data-dev:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=aep-migrator
+    networks:
+      - aep-network-dev
+
+  # ==========================================================================
+  # Redis (for job queue and caching)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: aep-migrator-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data-dev:/data
+    command: redis-server --appendonly yes
+    networks:
+      - aep-network-dev
+
+  # ==========================================================================
+  # MongoDB Express (optional GUI for development)
+  # ==========================================================================
+  mongo-express:
+    image: mongo-express:latest
+    container_name: aep-migrator-mongo-express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongo
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=admin
+    depends_on:
+      - mongo
+    networks:
+      - aep-network-dev
+
+networks:
+  aep-network-dev:
+    driver: bridge
+
+volumes:
+  mongo-data-dev:
+    driver: local
+  redis-data-dev:
+    driver: local
