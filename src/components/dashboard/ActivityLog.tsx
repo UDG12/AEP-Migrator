@@ -79,12 +79,11 @@ export function ActivityLog({ jobId }: ActivityLogProps) {
     refetchInterval: 2000,
   });
 
-  // Reverse logs to show latest first and apply filter
+  // Apply filter (API already returns newest first)
   const filteredLogs = useMemo(() => {
     if (!logs) return [];
-    const reversed = [...logs].reverse();
-    if (filter === 'all') return reversed;
-    return reversed.filter(log => log.level === filter);
+    if (filter === 'all') return logs;
+    return logs.filter(log => log.level === filter);
   }, [logs, filter]);
 
   // Count logs by level

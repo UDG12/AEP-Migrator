@@ -483,92 +483,136 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
       sourceOrg.credentials.sandboxName
     );
 
-    // Fetch all asset types from source
-    addLog(job, 'info', 'Fetching all assets from source organization...');
+    // Determine which asset types are needed based on selected asset IDs
+    const selectedAssetIds = job.assets.map((a: MigrationAsset) => a.sourceId);
 
-    try {
-      allSchemas = await sourceSchemaService.listSchemas();
-      addLog(job, 'info', `Found ${allSchemas.length} schemas in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch schemas from source');
+    // Helper to detect asset type from ID pattern
+    const detectNeededTypes = (ids: string[]): Set<string> => {
+      const types = new Set<string>();
+      for (const id of ids) {
+        if (id.includes('/schemas/') || id.includes('_xdm.')) types.add('schema');
+        if (id.includes('/mixins/') || id.includes('/fieldgroups/')) types.add('fieldGroup');
+        if (id.startsWith('dataset_') || id.match(/^[a-f0-9]{24}$/i)) types.add('dataset');
+        if (id.includes('segmentDefinition') || id.startsWith('aud_')) types.add('audience');
+        if (id.startsWith('ns_') || !id.includes('/')) types.add('identityNamespace');
+        if (id.startsWith('mp_') || id.includes('mergePolicy')) types.add('mergePolicy');
+        if (id.startsWith('ca_') || id.includes('computedAttribute')) types.add('computedAttribute');
+        if (id.startsWith('fc_') || id.includes('connection')) types.add('flowConnection');
+        if (id.startsWith('df_') || id.includes('flow')) types.add('dataFlow');
+        if (id.startsWith('sb_') || id.includes('sandbox')) types.add('sandbox');
+        if (id.startsWith('label_')) types.add('dataUsageLabel');
+        if (id.startsWith('policy_') || id.includes('governance')) types.add('governancePolicy');
+      }
+      // Always fetch schemas and field groups for dependency resolution
+      types.add('schema');
+      types.add('fieldGroup');
+      return types;
+    };
+
+    const neededTypes = detectNeededTypes(selectedAssetIds);
+    addLog(job, 'info', `Detected asset types needed: ${Array.from(neededTypes).join(', ')}`);
+
+    // Fetch only needed asset types in parallel for speed
+    addLog(job, 'info', 'Fetching assets from source organization (parallel)...');
+
+    const fetchPromises: Promise<void>[] = [];
+
+    // Always fetch schemas and field groups (needed for dependency resolution)
+    fetchPromises.push(
+      sourceSchemaService.listSchemas()
+        .then(result => { allSchemas = result; addLog(job, 'info', `Found ${allSchemas.length} schemas`); })
+        .catch(() => addLog(job, 'warn', 'Could not fetch schemas'))
+    );
+
+    fetchPromises.push(
+      sourceSchemaService.listFieldGroups()
+        .then(result => { allFieldGroups = result; addLog(job, 'info', `Found ${allFieldGroups.length} field groups`); })
+        .catch(() => addLog(job, 'warn', 'Could not fetch field groups'))
+    );
+
+    if (neededTypes.has('dataset')) {
+      fetchPromises.push(
+        sourceDatasetService.listDatasets()
+          .then(result => { allDatasets = result; addLog(job, 'info', `Found ${allDatasets.length} datasets`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch datasets'))
+      );
     }
 
-    try {
-      allFieldGroups = await sourceSchemaService.listFieldGroups();
-      addLog(job, 'info', `Found ${allFieldGroups.length} field groups in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch field groups from source');
+    if (neededTypes.has('audience')) {
+      fetchPromises.push(
+        sourceAudienceService.listAudiences()
+          .then(result => { allAudiences = result; addLog(job, 'info', `Found ${allAudiences.length} audiences`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch audiences'))
+      );
     }
 
-    try {
-      allDatasets = await sourceDatasetService.listDatasets();
-      addLog(job, 'info', `Found ${allDatasets.length} datasets in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch datasets from source');
+    if (neededTypes.has('identityNamespace')) {
+      fetchPromises.push(
+        sourceIdentityService.listNamespaces()
+          .then(result => { allIdentityNamespaces = result; addLog(job, 'info', `Found ${allIdentityNamespaces.length} identity namespaces`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch identity namespaces'))
+      );
     }
 
-    try {
-      allAudiences = await sourceAudienceService.listAudiences();
-      addLog(job, 'info', `Found ${allAudiences.length} audiences in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch audiences from source');
+    if (neededTypes.has('mergePolicy')) {
+      fetchPromises.push(
+        sourceProfileService.listMergePolicies()
+          .then(result => { allMergePolicies = result; addLog(job, 'info', `Found ${allMergePolicies.length} merge policies`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch merge policies'))
+      );
     }
 
-    try {
-      allIdentityNamespaces = await sourceIdentityService.listNamespaces();
-      addLog(job, 'info', `Found ${allIdentityNamespaces.length} identity namespaces in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch identity namespaces from source');
+    if (neededTypes.has('computedAttribute')) {
+      fetchPromises.push(
+        sourceProfileService.listComputedAttributes()
+          .then(result => { allComputedAttributes = result; addLog(job, 'info', `Found ${allComputedAttributes.length} computed attributes`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch computed attributes'))
+      );
     }
 
-    try {
-      allMergePolicies = await sourceProfileService.listMergePolicies();
-      addLog(job, 'info', `Found ${allMergePolicies.length} merge policies in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch merge policies from source');
+    if (neededTypes.has('flowConnection')) {
+      fetchPromises.push(
+        sourceFlowService.listConnections()
+          .then(result => { allFlowConnections = result; addLog(job, 'info', `Found ${allFlowConnections.length} flow connections`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch flow connections'))
+      );
     }
 
-    try {
-      allComputedAttributes = await sourceProfileService.listComputedAttributes();
-      addLog(job, 'info', `Found ${allComputedAttributes.length} computed attributes in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch computed attributes from source');
+    if (neededTypes.has('dataFlow')) {
+      fetchPromises.push(
+        sourceFlowService.listFlows()
+          .then(result => { allDataFlows = result; addLog(job, 'info', `Found ${allDataFlows.length} data flows`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch data flows'))
+      );
     }
 
-    try {
-      allFlowConnections = await sourceFlowService.listConnections();
-      addLog(job, 'info', `Found ${allFlowConnections.length} flow connections in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch flow connections from source');
+    if (neededTypes.has('sandbox')) {
+      fetchPromises.push(
+        sourceSandboxService.listSandboxes()
+          .then(result => { allSandboxes = result; addLog(job, 'info', `Found ${allSandboxes.length} sandboxes`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch sandboxes'))
+      );
     }
 
-    try {
-      allDataFlows = await sourceFlowService.listFlows();
-      addLog(job, 'info', `Found ${allDataFlows.length} data flows in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch data flows from source');
+    if (neededTypes.has('dataUsageLabel')) {
+      fetchPromises.push(
+        sourcePolicyService.listLabels()
+          .then(result => { allDataUsageLabels = result; addLog(job, 'info', `Found ${allDataUsageLabels.length} data usage labels`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch data usage labels'))
+      );
     }
 
-    try {
-      allSandboxes = await sourceSandboxService.listSandboxes();
-      addLog(job, 'info', `Found ${allSandboxes.length} sandboxes in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch sandboxes from source');
+    if (neededTypes.has('governancePolicy')) {
+      fetchPromises.push(
+        sourcePolicyService.listPolicies()
+          .then(result => { allGovernancePolicies = result; addLog(job, 'info', `Found ${allGovernancePolicies.length} governance policies`); })
+          .catch(() => addLog(job, 'warn', 'Could not fetch governance policies'))
+      );
     }
 
-    try {
-      allDataUsageLabels = await sourcePolicyService.listLabels();
-      addLog(job, 'info', `Found ${allDataUsageLabels.length} data usage labels in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch data usage labels from source');
-    }
-
-    try {
-      allGovernancePolicies = await sourcePolicyService.listPolicies();
-      addLog(job, 'info', `Found ${allGovernancePolicies.length} governance policies in source`);
-    } catch (e) {
-      addLog(job, 'warn', 'Could not fetch governance policies from source');
-    }
+    // Wait for all fetches to complete in parallel
+    await Promise.all(fetchPromises);
+    addLog(job, 'info', 'Asset fetching complete');
 
     // Build dependency map with all asset types
     const assetMap = new Map<string, any>();
@@ -700,39 +744,60 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
     addLog(job, 'info', `Migration order resolved: ${job.totalAssets} assets to migrate`);
     addLog(job, 'info', `Asset breakdown: ${Object.entries(typeCount).map(([t, c]) => `${t}(${c})`).join(', ')}`);
 
-    // Get existing assets in target to check for conflicts
+    // Get existing assets in target to check for conflicts (parallel fetch)
     let targetSchemas: any[] = [];
     let targetFieldGroups: any[] = [];
+    let targetDatasets: any[] = [];
+    let targetFetchFailed = false;
 
-    try {
-      targetSchemas = await targetSchemaService.listSchemas();
+    addLog(job, 'info', 'Fetching existing assets from target organization (parallel)...');
+
+    const targetFetchResults = await Promise.allSettled([
+      targetSchemaService.listSchemas(),
+      targetSchemaService.listFieldGroups(),
+      targetDatasetService.listDatasets(),
+    ]);
+
+    // Process schemas result
+    if (targetFetchResults[0].status === 'fulfilled') {
+      targetSchemas = targetFetchResults[0].value;
       addLog(job, 'info', `Found ${targetSchemas.length} existing schemas in target`);
-    } catch (e: any) {
-      const errorMsg = e.response?.data?.detail || e.response?.data?.message || e.message;
-      const status = e.response?.status;
+    } else {
+      const e = targetFetchResults[0].reason;
+      const errorMsg = e?.response?.data?.detail || e?.response?.data?.message || e?.message;
+      const status = e?.response?.status;
       if (status === 403) {
         addLog(job, 'error', `Target org access denied (403): ${errorMsg}. Check that target credentials have Schema Registry permissions.`);
         job.status = 'failed';
-        return;
+        targetFetchFailed = true;
+      } else {
+        addLog(job, 'warn', `Could not fetch schemas from target: ${errorMsg}`);
       }
-      addLog(job, 'warn', `Could not fetch schemas from target: ${errorMsg}`);
     }
 
-    try {
-      targetFieldGroups = await targetSchemaService.listFieldGroups();
+    // Process field groups result
+    if (targetFetchResults[1].status === 'fulfilled') {
+      targetFieldGroups = targetFetchResults[1].value;
       addLog(job, 'info', `Found ${targetFieldGroups.length} existing field groups in target`);
-    } catch (e: any) {
-      const errorMsg = e.response?.data?.detail || e.response?.data?.message || e.message;
+    } else {
+      const e = targetFetchResults[1].reason;
+      const errorMsg = e?.response?.data?.detail || e?.response?.data?.message || e?.message;
       addLog(job, 'warn', `Could not fetch field groups from target: ${errorMsg}`);
     }
 
-    let targetDatasets: any[] = [];
-    try {
-      targetDatasets = await targetDatasetService.listDatasets();
+    // Process datasets result
+    if (targetFetchResults[2].status === 'fulfilled') {
+      targetDatasets = targetFetchResults[2].value;
       addLog(job, 'info', `Found ${targetDatasets.length} existing datasets in target`);
-    } catch (e: any) {
-      const errorMsg = e.response?.data?.detail || e.response?.data?.message || e.message;
+    } else {
+      const e = targetFetchResults[2].reason;
+      const errorMsg = e?.response?.data?.detail || e?.response?.data?.message || e?.message;
       addLog(job, 'warn', `Could not fetch datasets from target: ${errorMsg}`);
+    }
+
+    if (targetFetchFailed) {
+      job.updatedAt = new Date();
+      return;
     }
 
     const targetAssetsByTitle = new Map<string, any>();
