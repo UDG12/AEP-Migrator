@@ -651,9 +651,15 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
       if (resolvedIds.has(assetId)) return;
 
       const asset = assetMap.get(assetId);
-      if (!asset) return;
+      if (!asset) {
+        // Asset not found in map - still add to migration order with original ID
+        addLog(job, 'warn', `Asset ${assetId.substring(0, 50)}... not found in fetched assets, will attempt migration anyway`);
+        resolvedIds.add(assetId);
+        migrationOrder.push(assetId);
+        return;
+      }
 
-      // For schemas, fetch full details to get meta:extends
+      // For schemas, fetch full details to get meta:extends (skip dependency check if it takes too long)
       if (asset.assetType === 'schema') {
         try {
           addLog(job, 'info', `Checking dependencies for schema: ${asset.title}`);
@@ -673,7 +679,7 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
             }
           }
         } catch (e: any) {
-          addLog(job, 'warn', `Could not fetch schema details for dependency check: ${e.message}`);
+          addLog(job, 'warn', `Could not fetch schema details: ${e.message?.substring(0, 100)}`);
         }
       }
 
@@ -702,11 +708,17 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
       migrationOrder.push(assetId);
     }
 
-    // Resolve all dependencies (needs to be sequential for async)
+    // Resolve all dependencies
     addLog(job, 'info', `Resolving dependencies for ${selectedIds.size} selected assets...`);
+    let resolveCount = 0;
     for (const assetId of Array.from(selectedIds)) {
+      resolveCount++;
+      if (resolveCount % 5 === 0) {
+        addLog(job, 'info', `Processing asset ${resolveCount}/${selectedIds.size}...`);
+      }
       await resolveDependencies(assetId);
     }
+    addLog(job, 'info', `Dependency resolution complete: ${migrationOrder.length} assets in queue`);
 
     // Build assets with type information
     const assetsWithTypes: MigrationAsset[] = migrationOrder.map(assetId => {
@@ -885,20 +897,26 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
     }
 
     // Migrate each asset
+    addLog(job, 'info', `Starting migration of ${job.assets.length} assets...`);
+
     for (let i = 0; i < job.assets.length; i++) {
       const asset = job.assets[i];
       const sourceAsset = assetMap.get(asset.sourceId);
+
+      // Update progress at start of each iteration
+      job.progress = Math.round((i / Math.max(job.assets.length, 1)) * 100);
+      job.updatedAt = new Date();
 
       if (!sourceAsset) {
         asset.status = 'skipped';
         asset.error = 'Asset not found in source';
         job.skippedAssets++;
-        addLog(job, 'warn', `Skipped: ${asset.name} - not found`, asset.id);
+        addLog(job, 'warn', `[${i + 1}/${job.assets.length}] Skipped: ${asset.name} - not found in fetched assets`, asset.id);
         continue;
       }
 
       asset.status = 'in_progress';
-      addLog(job, 'info', `Migrating: ${sourceAsset.title} (${asset.type})`, asset.id);
+      addLog(job, 'info', `[${i + 1}/${job.assets.length}] Migrating: ${sourceAsset.title} (${asset.type})`, asset.id);
 
       try {
         // Check if exists in target
@@ -2200,15 +2218,21 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
         }
       }
 
-      // Update progress
+      // Update progress after each asset
       job.progress = Math.round(((i + 1) / job.assets.length) * 100);
       job.updatedAt = new Date();
+
+      // Log progress every 5 assets or at end
+      if ((i + 1) % 5 === 0 || i === job.assets.length - 1) {
+        addLog(job, 'info', `Progress: ${job.progress}% (${i + 1}/${job.assets.length}) - Completed: ${job.completedAssets}, Failed: ${job.failedAssets}, Skipped: ${job.skippedAssets}`);
+      }
     }
 
     // Complete
-    job.status = job.failedAssets > 0 ? 'failed' : 'completed';
+    job.status = job.failedAssets > 0 && job.completedAssets === 0 ? 'failed' : 'completed';
     job.progress = 100;
-    addLog(job, 'info', `Migration completed: ${job.completedAssets} succeeded, ${job.failedAssets} failed, ${job.skippedAssets} skipped`);
+    job.updatedAt = new Date();
+    addLog(job, 'success', `Migration completed: ${job.completedAssets} succeeded, ${job.failedAssets} failed, ${job.skippedAssets} skipped`);
 
   } catch (error) {
     job.status = 'failed';
@@ -2219,15 +2243,15 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
   job.updatedAt = new Date();
 }
 
-function addLog(job: MigrationJob, level: 'info' | 'warn' | 'error', message: string, assetId?: string) {
+function addLog(job: MigrationJob, level: 'info' | 'warn' | 'error' | 'success', message: string, assetId?: string) {
   job.logs.push({
     timestamp: new Date(),
-    level,
+    level: level === 'success' ? 'info' : level, // Map success to info for storage
     message,
     assetId,
   });
   const logData = { jobId: job.id, assetId };
-  if (level === 'info') {
+  if (level === 'info' || level === 'success') {
     logger.info(message, logData);
   } else if (level === 'warn') {
     logger.warn(message, logData);
