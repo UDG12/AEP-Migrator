@@ -86,6 +86,40 @@ function transformNamespace(obj: any, sourceNamespace: string, targetNamespace: 
   return obj;
 }
 
+// Helper to transform segment IDs in PQL expressions for inSegment dependencies
+// When audiences reference other audiences via inSegment(), we need to map source IDs to target IDs
+function transformSegmentIds(pqlExpression: string, segmentIdMapping: Map<string, string>): { transformed: string; mappingsApplied: number } {
+  let transformed = pqlExpression;
+  let mappingsApplied = 0;
+
+  // Pattern to match segment IDs in inSegment calls
+  // PQL JSON format: "inSegment","params":[{"nodeType":"literal","literalType":"String","value":"UUID"}]
+  // We need to replace the UUID values that reference other segments
+  for (const [sourceId, targetId] of segmentIdMapping.entries()) {
+    // Match segment IDs in various PQL patterns
+    const patterns = [
+      // JSON format: "value":"uuid"
+      new RegExp(`"value":\\s*"${sourceId}"`, 'g'),
+      // Direct ID reference
+      new RegExp(`"${sourceId}"`, 'g'),
+    ];
+
+    for (const pattern of patterns) {
+      if (pattern.test(transformed)) {
+        const before = transformed;
+        transformed = transformed.replace(pattern, (match) => {
+          return match.replace(sourceId, targetId);
+        });
+        if (before !== transformed) {
+          mappingsApplied++;
+        }
+      }
+    }
+  }
+
+  return { transformed, mappingsApplied };
+}
+
 // Helper to recursively clean up empty 'properties' objects that cause XDM validation errors
 // Adobe Schema Registry rejects objects like {"properties": {}, "type": "object"}
 // Also cleans up objects with type: "object" but missing required properties/additionalProperties/$ref/allOf
@@ -331,13 +365,23 @@ export async function POST(request: NextRequest) {
 
     logger.info('Migration job created', { jobId });
 
-    // Start migration in background
-    executeMigration(jobId, sourceOrg, targetOrg);
+    // Run migration synchronously for serverless environments
+    await executeMigration(jobId, sourceOrg, targetOrg);
 
+    // Return full job status after completion
+    const completedJob = global.migrationJobs!.get(jobId);
     return NextResponse.json({
       success: true,
       jobId,
-      message: 'Migration job started',
+      message: 'Migration completed',
+      status: completedJob?.status,
+      progress: completedJob?.progress,
+      totalAssets: completedJob?.totalAssets,
+      completedAssets: completedJob?.completedAssets,
+      failedAssets: completedJob?.failedAssets,
+      skippedAssets: completedJob?.skippedAssets,
+      logs: completedJob?.logs,
+      assets: completedJob?.assets,
     });
   } catch (error) {
     logger.error('Error starting migration', { error });
@@ -439,6 +483,8 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
     let allSandboxes: any[] = [];
     let allDataUsageLabels: any[] = [];
     let allGovernancePolicies: any[] = [];
+    let targetAudiencesList: any[] = [];  // Store target audiences for segment ID mapping
+    const segmentIdMapping: Map<string, string> = new Map();  // Source segment ID -> Target segment ID
 
     // Create all source services
     const sourceAudienceService = createAudienceService(
@@ -489,11 +535,15 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
     // Helper to detect asset type from ID pattern
     const detectNeededTypes = (ids: string[]): Set<string> => {
       const types = new Set<string>();
+      // UUID pattern for audience IDs (e.g., aac13b91-f326-4073-8cdb-aa40ac1989ac)
+      const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
       for (const id of ids) {
         if (id.includes('/schemas/') || id.includes('_xdm.')) types.add('schema');
         if (id.includes('/mixins/') || id.includes('/fieldgroups/')) types.add('fieldGroup');
         if (id.startsWith('dataset_') || id.match(/^[a-f0-9]{24}$/i)) types.add('dataset');
-        if (id.includes('segmentDefinition') || id.startsWith('aud_')) types.add('audience');
+        // Audience IDs can be UUIDs, contain 'segmentDefinition', or start with 'aud_'
+        if (id.includes('segmentDefinition') || id.startsWith('aud_') || uuidPattern.test(id)) types.add('audience');
         if (id.startsWith('ns_') || !id.includes('/')) types.add('identityNamespace');
         if (id.startsWith('mp_') || id.includes('mergePolicy')) types.add('mergePolicy');
         if (id.startsWith('ca_') || id.includes('computedAttribute')) types.add('computedAttribute');
@@ -864,31 +914,54 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
       }
     }
 
-    // If still no target namespace, try to get it from target audiences
-    if (!targetNamespace) {
-      const targetAudienceService = createAudienceService(
-        targetOrg.accessToken,
-        targetOrg.credentials.clientId,
-        targetOrg.credentials.orgId,
-        targetOrg.credentials.sandboxName
-      );
-      try {
-        const targetAudiences = await targetAudienceService.listAudiences();
-        if (targetAudiences.length > 0) {
-          // Try to extract namespace from audience's PQL expression
-          for (const aud of targetAudiences) {
-            const pql = aud.expression?.value || '';
-            const namespaceMatch = pql.match(/_([a-zA-Z0-9]+)\./);
-            if (namespaceMatch) {
-              targetNamespace = namespaceMatch[1];
-              addLog(job, 'info', `Target tenant namespace (from audience PQL): ${targetNamespace}`);
-              break;
-            }
+    // Fetch target audiences for namespace detection AND segment ID mapping
+    const targetAudienceService = createAudienceService(
+      targetOrg.accessToken,
+      targetOrg.credentials.clientId,
+      targetOrg.credentials.orgId,
+      targetOrg.credentials.sandboxName
+    );
+    try {
+      targetAudiencesList = await targetAudienceService.listAudiences();
+      addLog(job, 'info', `Found ${targetAudiencesList.length} existing audiences in target`);
+
+      // Build segment ID mapping (source ID -> target ID) based on matching names
+      // This is needed for audiences that use inSegment() to reference other audiences
+      if (allAudiences.length > 0 && targetAudiencesList.length > 0) {
+        const targetAudiencesByName = new Map<string, string>();
+        for (const targetAud of targetAudiencesList) {
+          if (targetAud.name && targetAud.id) {
+            targetAudiencesByName.set(targetAud.name.toLowerCase().trim(), targetAud.id);
           }
         }
-      } catch (e) {
-        addLog(job, 'warn', 'Could not fetch target audiences to determine namespace');
+
+        for (const sourceAud of allAudiences) {
+          const sourceName = (sourceAud.name || '').toLowerCase().trim();
+          const targetId = targetAudiencesByName.get(sourceName);
+          if (targetId && sourceAud.id) {
+            segmentIdMapping.set(sourceAud.id, targetId);
+          }
+        }
+
+        if (segmentIdMapping.size > 0) {
+          addLog(job, 'info', `Built segment ID mapping: ${segmentIdMapping.size} source->target mappings for inSegment dependencies`);
+        }
       }
+
+      // Try to extract namespace from audience's PQL expression if not already set
+      if (!targetNamespace && targetAudiencesList.length > 0) {
+        for (const aud of targetAudiencesList) {
+          const pql = aud.expression?.value || '';
+          const namespaceMatch = pql.match(/_([a-zA-Z0-9]+)\./);
+          if (namespaceMatch) {
+            targetNamespace = namespaceMatch[1];
+            addLog(job, 'info', `Target tenant namespace (from audience PQL): ${targetNamespace}`);
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      addLog(job, 'warn', 'Could not fetch target audiences for namespace/segment mapping');
     }
 
     // If still no namespace, we'll extract it from the first error response
@@ -1799,6 +1872,25 @@ async function executeMigration(jobId: string, sourceOrg: any, targetOrg: any) {
               addLog(job, 'info', `Transformed PQL: ${transformedExpression.substring(0, 200)}...`, asset.id);
             } else {
               addLog(job, 'warn', `No namespace transformation applied. Source: ${effectiveSourceNamespace}, Target: ${targetNamespace}`, asset.id);
+            }
+
+            // Transform segment IDs for inSegment dependencies
+            // This is critical for audiences that reference other audiences
+            if (segmentIdMapping.size > 0) {
+              const { transformed, mappingsApplied } = transformSegmentIds(transformedExpression, segmentIdMapping);
+              if (mappingsApplied > 0) {
+                transformedExpression = transformed;
+                addLog(job, 'info', `Transformed ${mappingsApplied} segment ID reference(s) in PQL for inSegment dependencies`, asset.id);
+              }
+            }
+
+            // Check if audience has dependencies that couldn't be mapped
+            if (sourceAudience.dependencies && sourceAudience.dependencies.length > 0) {
+              const unmappedDeps = sourceAudience.dependencies.filter((depId: string) => !segmentIdMapping.has(depId));
+              if (unmappedDeps.length > 0) {
+                addLog(job, 'warn', `Audience has ${unmappedDeps.length} unmapped dependency(ies): ${unmappedDeps.join(', ')}`, asset.id);
+                addLog(job, 'warn', `These referenced audiences may not exist in target. Migration may fail.`, asset.id);
+              }
             }
 
             // Transform schema name if it contains namespace

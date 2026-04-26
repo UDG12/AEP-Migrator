@@ -52,7 +52,7 @@ export function OrganizationSetup({ onComplete }: OrganizationSetupProps) {
       clientId: '',
       clientSecret: '',
       orgId: '',
-      sandboxName: 'prod',
+      sandboxName: '',
     },
   });
 
@@ -61,7 +61,7 @@ export function OrganizationSetup({ onComplete }: OrganizationSetupProps) {
       clientId: '',
       clientSecret: '',
       orgId: '',
-      sandboxName: 'aep-test',
+      sandboxName: '',
     },
   });
 
@@ -104,10 +104,29 @@ export function OrganizationSetup({ onComplete }: OrganizationSetupProps) {
           toast.success('Target organization connected');
         }
       } else {
-        toast.error(result.error || 'Validation failed');
+        // Show specific error messages based on the error type
+        const errorMessage = result.error || 'Validation failed';
+        if (errorMessage.includes('401') || errorMessage.toLowerCase().includes('unauthorized')) {
+          toast.error('Invalid credentials. Please check your Client ID and Client Secret.');
+        } else if (errorMessage.includes('403') || errorMessage.toLowerCase().includes('forbidden')) {
+          toast.error('Access denied. Please check your Organization ID and ensure you have the required permissions.');
+        } else if (errorMessage.includes('404') || errorMessage.toLowerCase().includes('not found')) {
+          toast.error('Sandbox not found. Please verify the sandbox name exists in your organization.');
+        } else if (errorMessage.includes('sandbox')) {
+          toast.error('Invalid sandbox. Please check the sandbox name and try again.');
+        } else {
+          toast.error(errorMessage);
+        }
       }
-    } catch (error) {
-      toast.error('Failed to validate credentials');
+    } catch (error: any) {
+      // Handle network errors and other exceptions
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        toast.error('Network error. Please check your internet connection and try again.');
+      } else if (error.message) {
+        toast.error(`Connection failed: ${error.message}`);
+      } else {
+        toast.error('Failed to connect. Please check your credentials and try again.');
+      }
     } finally {
       setIsValidating(false);
     }
@@ -219,41 +238,81 @@ export function OrganizationSetup({ onComplete }: OrganizationSetupProps) {
             <>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Organization ID (IMS Org ID)</label>
+                  <label className="label">Organization ID (IMS Org ID) <span className="text-red-500">*</span></label>
                   <input
-                    {...form.register('orgId', { required: true })}
-                    className="input"
+                    {...form.register('orgId', {
+                      required: 'Organization ID is required',
+                      pattern: {
+                        value: /^[A-F0-9]{16,32}@AdobeOrg$/i,
+                        message: 'Invalid format. Should be like: XXXXXXXXXXXXXXXX@AdobeOrg'
+                      }
+                    })}
+                    className={`input ${form.formState.errors.orgId ? 'border-red-500' : ''}`}
                     placeholder="XXXXXXXXXXXXXXXX@AdobeOrg"
                   />
+                  {form.formState.errors.orgId && (
+                    <p className="text-red-500 text-xs mt-1">{form.formState.errors.orgId.message}</p>
+                  )}
                 </div>
 
                 <div>
-                  <label className="label">Sandbox Name</label>
+                  <label className="label">Sandbox Name <span className="text-red-500">*</span></label>
                   <input
-                    {...form.register('sandboxName', { required: true })}
-                    className="input"
-                    placeholder="prod"
+                    {...form.register('sandboxName', {
+                      required: 'Sandbox name is required',
+                      minLength: {
+                        value: 1,
+                        message: 'Sandbox name cannot be empty'
+                      },
+                      pattern: {
+                        value: /^[a-zA-Z0-9_-]+$/,
+                        message: 'Only letters, numbers, hyphens and underscores allowed'
+                      }
+                    })}
+                    className={`input ${form.formState.errors.sandboxName ? 'border-red-500' : ''}`}
+                    placeholder="e.g., prod, dev, aep-test"
                   />
+                  {form.formState.errors.sandboxName && (
+                    <p className="text-red-500 text-xs mt-1">{form.formState.errors.sandboxName.message}</p>
+                  )}
                 </div>
               </div>
 
               <div>
-                <label className="label">Client ID</label>
+                <label className="label">Client ID <span className="text-red-500">*</span></label>
                 <input
-                  {...form.register('clientId', { required: true })}
-                  className="input"
+                  {...form.register('clientId', {
+                    required: 'Client ID is required',
+                    minLength: {
+                      value: 10,
+                      message: 'Client ID seems too short'
+                    }
+                  })}
+                  className={`input ${form.formState.errors.clientId ? 'border-red-500' : ''}`}
                   placeholder="Enter your OAuth Client ID"
                 />
+                {form.formState.errors.clientId && (
+                  <p className="text-red-500 text-xs mt-1">{form.formState.errors.clientId.message}</p>
+                )}
               </div>
 
               <div>
-                <label className="label">Client Secret</label>
+                <label className="label">Client Secret <span className="text-red-500">*</span></label>
                 <input
                   type="password"
-                  {...form.register('clientSecret', { required: true })}
-                  className="input"
+                  {...form.register('clientSecret', {
+                    required: 'Client Secret is required',
+                    minLength: {
+                      value: 10,
+                      message: 'Client Secret seems too short'
+                    }
+                  })}
+                  className={`input ${form.formState.errors.clientSecret ? 'border-red-500' : ''}`}
                   placeholder="Enter your OAuth Client Secret"
                 />
+                {form.formState.errors.clientSecret && (
+                  <p className="text-red-500 text-xs mt-1">{form.formState.errors.clientSecret.message}</p>
+                )}
               </div>
             </>
           )}

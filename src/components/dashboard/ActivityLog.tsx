@@ -26,6 +26,7 @@ interface LogEntry {
 
 interface ActivityLogProps {
   jobId: string;
+  isCjaMigration?: boolean;
 }
 
 const levelIcons = {
@@ -64,15 +65,19 @@ const levelColors = {
 
 type FilterType = 'all' | 'info' | 'warn' | 'error' | 'success';
 
-export function ActivityLog({ jobId }: ActivityLogProps) {
+export function ActivityLog({ jobId, isCjaMigration = false }: ActivityLogProps) {
   const [filter, setFilter] = useState<FilterType>('all');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
 
   const { data: logs } = useQuery({
-    queryKey: ['migration-logs', jobId],
+    queryKey: ['migration-logs', jobId, isCjaMigration],
     queryFn: async () => {
-      const response = await fetch(`/api/migration/${jobId}/logs`);
+      // Use the correct endpoint based on migration type
+      const endpoint = isCjaMigration
+        ? `/api/migration/cja/${jobId}/logs`
+        : `/api/migration/${jobId}/logs`;
+      const response = await fetch(endpoint);
       if (!response.ok) throw new Error('Failed to fetch logs');
       return response.json() as Promise<LogEntry[]>;
     },
